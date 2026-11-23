@@ -1,0 +1,17 @@
+name: Validate Orchestrator Compose
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Copy .env.example to .env
+        run: cp .env.example .env
+      - name: Validate docker-compose.yml syntax
+        run: docker compose config --quiet

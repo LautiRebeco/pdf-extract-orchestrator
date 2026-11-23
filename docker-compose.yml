@@ -1,0 +1,144 @@
+services:
+  traefik:
+    image: traefik:v3.3
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:8000"
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+      - "${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+    labels:
+      - "traefik.enable=true"
+      # Middleware de Rate Limit en el borde (protege contra ráfagas de tráfico)
+      - "traefik.http.middlewares.edge-ratelimit.ratelimit.average=${RATE_LIMIT_AVG:-30}"
+      - "traefik.http.middlewares.edge-ratelimit.ratelimit.burst=${RATE_LIMIT_BURST:-60}"
+      # Middleware de tamaño máximo de body (11 MB para permitir PDFs de hasta 10 MB + overhead multipart)
+      - "traefik.http.middlewares.pdf-maxbody.buffering.maxRequestBodyBytes=11534336"
+    networks:
+      - polyrepo-net
+
+  extract:
+    image: ${EXTRACT_IMAGE:-ghcr.io/lighuen04/pdf-extract-service:latest}
+    restart: unless-stopped
+    deploy:
+      replicas: ${EXTRACT_REPLICAS:-5}
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+    environment:
+      APP_NAME: "PDF Extract Service"
+      APP_MAX_PDF_SIZE_BYTES: "${MAX_PDF_SIZE_BYTES:-10485760}"
+      APP_OCR_ENABLED: "${APP_OCR_ENABLED:-false}"
+      APP_EXTRACT_WORKERS: "${APP_EXTRACT_WORKERS:-1}"
+      APP_MAX_PENDING_EXTRACTIONS: "${APP_MAX_PENDING_EXTRACTIONS:-100}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.extract.rule=PathPrefix(`/extract`)"
+      - "traefik.http.routers.extract.entrypoints=web"
+      - "traefik.http.routers.extract.middlewares=edge-ratelimit,pdf-maxbody"
+      - "traefik.http.services.extract.loadbalancer.server.port=8000"
+    networks:
+      - polyrepo-net
+
+  documents:
+    image: ${DOCUMENTS_IMAGE:-ghcr.io/lautirebeco/pdf-documents-service:latest}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+    environment:
+      APP_NAME: "PDF Documents Service"
+      APP_MAX_PDF_SIZE_BYTES: "${MAX_PDF_SIZE_BYTES:-10485760}"
+      MONGODB_URI: "mongodb://mongodb:27017"
+      MONGODB_DB_NAME: "${MONGODB_DB_NAME:-pdf-extractext}"
+      MONGO_COLLECTION_NAME: "${MONGO_COLLECTION_NAME:-documents}"
+      REDIS_URL: "redis://redis:6379/0"
+      # Comunicación interna directa por DNS de Docker (Round-Robin entre las réplicas de extract)
+      EXTRACT_SERVICE_URL: "http://extract:8000"
+      EXTRACT_TIMEOUT_S: "${EXTRACT_TIMEOUT_S:-30}"
+      EXTRACT_MAX_ATTEMPTS: "${EXTRACT_MAX_ATTEMPTS:-2}"
+      API_KEY: "${DOCUMENTS_API_KEY:-}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      extract:
+        condition: service_healthy
+      documents-indexes:
+        condition: service_completed_successfully
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.documents.rule=PathPrefix(`/documents`)"
+      - "traefik.http.routers.documents.entrypoints=web"
+      - "traefik.http.routers.documents.middlewares=edge-ratelimit,pdf-maxbody"
+      - "traefik.http.services.documents.loadbalancer.server.port=8000"
+    networks:
+      - polyrepo-net
+
+  # Tarea administrativa puntual (Factor 12): garantiza el índice único de checksums antes de recibir tráfico
+  documents-indexes:
+    image: ${DOCUMENTS_IMAGE:-ghcr.io/lautirebeco/pdf-documents-service:latest}
+    restart: "no"
+    command: ["python", "-m", "app.admin.create_indexes"]
+    environment:
+      MONGODB_URI: "mongodb://mongodb:27017"
+      MONGODB_DB_NAME: "${MONGODB_DB_NAME:-pdf-extractext}"
+      MONGO_COLLECTION_NAME: "${MONGO_COLLECTION_NAME:-documents}"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    networks:
+      - polyrepo-net
+
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - polyrepo-net
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - polyrepo-net
+
+networks:
+  polyrepo-net:
+    driver: bridge
+
+volumes:
+  mongo-data:
