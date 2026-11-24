@@ -11,7 +11,19 @@
 
 ---
 
-## 🧩 Los repositorios del sistema
+📂 Estructura del Repositorio
+pdf-extract-orchestrator/
+├── docker-compose.yml             # Definición completa de la topología, redes, volúmenes y Traefik
+├── .env.example                   # Plantilla centralizada de variables de entorno (Factor III)
+├── .gitignore                     # Exclusión de archivos sensibles (.env) y logs temporales
+├── scripts/
+│   ├── run-gui.ps1                # Script de lanzamiento de pdf-gui para Windows (PowerShell)
+│   └── run-gui.sh                 # Script de lanzamiento de pdf-gui para Linux / macOS
+├── .github/
+│   └── workflows/
+│       └── validate.yml           # Pipeline de CI: valida sintaxis de Docker Compose en cada push
+└── README.md                      # Documentación arquitectónica y guía de operación
+
 
 | Repositorio | Rol en la arquitectura | Imagen / ejecución | Exposición |
 |---|---|---|---|
@@ -55,7 +67,7 @@ flowchart TB
   IDX -->|"índice único por checksum"| MONGO
 ```
 
-**Idea clave para el profesor:** el cliente *nunca* habla con los microservicios. Habla con
+el cliente *nunca* habla con los microservicios. Habla con
 Traefik, que rutea por prefijo de URL y balancea entre las réplicas. El servicio `documents`, en
 cambio, llama a `extract` **por DNS interno de Docker** (`http://extract:8000`), sin volver a
 pasar por el gateway. Eso evita publicar el servicio de extracción y evita el `404` que aparecía
